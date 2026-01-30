@@ -12,6 +12,7 @@
 import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
 import { createLogger } from '@/lib/logger';
 import type { ToolContext } from '@/mcp/context';
+import type { Result } from '@/types/core';
 import { join } from 'node:path';
 import { existsSync, writeFileSync } from 'node:fs';
 import { DockerTestCleaner } from '../../__support__/utilities/docker-test-cleaner';
@@ -41,6 +42,49 @@ describe('Docker Workflow Integration', () => {
   const fixtureBasePath = join(process.cwd(), 'test', '__support__', 'fixtures');
   const testTimeout = 120000; // 2 minutes
   let dockerAvailable = false;
+
+  /**
+   * Retry helper for operations that may fail due to timing/race conditions
+   */
+  async function retryOperation<T>(
+    operation: () => Promise<Result<T>>,
+    options: {
+      maxRetries?: number;
+      baseDelayMs?: number;
+      operationName?: string;
+      logContext?: Record<string, unknown>;
+    } = {}
+  ): Promise<Result<T>> {
+    const { maxRetries = 3, baseDelayMs = 100, operationName = 'operation', logContext = {} } = options;
+
+    let lastResult: Result<T> | undefined;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      lastResult = await operation();
+
+      if (lastResult.ok) {
+        return lastResult;
+      }
+
+      console.warn(`${operationName} attempt ${attempt + 1}/${maxRetries} failed:`, {
+        ...logContext,
+        error: lastResult.error,
+        guidance: lastResult.guidance,
+      });
+
+      if (attempt < maxRetries - 1) {
+        const delayMs = baseDelayMs * Math.pow(2, attempt);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+
+    if (lastResult === undefined) {
+      throw new Error(`${operationName} failed: operation returned undefined after ${maxRetries} attempts`);
+    }
+
+    console.log(`All ${maxRetries} attempts failed for ${operationName}. Final result:`, lastResult);
+    return lastResult;
+  }
 
   beforeAll(async () => {
     // Initialize Docker test cleaner
@@ -155,41 +199,17 @@ describe('Docker Workflow Integration', () => {
 
       // Step 5: Tag image (with retry for potential race condition after build)
       const newTag = `docker-workflow-test:v1.0`;
-      let tagResult;
-      const maxRetries = 3;
-
-      for (let attempt = 0; attempt < maxRetries; attempt++) {
-        tagResult = await tagImageTool.handler(
-          {
-            imageId: build.imageId,
-            tag: newTag,
-          },
-          toolContext
-        );
-
-        if (tagResult.ok) {
-          break;
+      const tagResult = await retryOperation(
+        () => tagImageTool.handler({ imageId: build.imageId, tag: newTag }, toolContext),
+        {
+          operationName: 'Tag image',
+          logContext: { imageId: build.imageId, tag: newTag },
         }
+      );
 
-        // Log error details for debugging
-        console.log(`Tag attempt ${attempt + 1} failed:`, {
-          error: tagResult.error,
-          guidance: tagResult.guidance,
-          imageId: build.imageId,
-          tag: newTag,
-        });
-
-        // If tag failed and we have retries left, wait briefly and retry
-        if (attempt < maxRetries - 1) {
-          await new Promise((resolve) => setTimeout(resolve, 100 * Math.pow(2, attempt)));
-        }
-      }
-
-      expect(tagResult?.ok).toBe(true);
-      if (tagResult?.ok) {
+      expect(tagResult.ok).toBe(true);
+      if (tagResult.ok) {
         expect(tagResult.value).toBeDefined();
-      } else {
-        console.log('All tag attempts failed. Final result:', tagResult);
       }
     }, testTimeout);
 
@@ -253,27 +273,17 @@ CMD ["python", "app.py"]`
         testCleaner.trackImage(build.imageId);
 
         // Step 4: Tag the image (with retry for potential race condition)
-        let tagResult;
-        const maxRetries = 3;
-
-        for (let attempt = 0; attempt < maxRetries; attempt++) {
-          tagResult = await tagImageTool.handler(
-            {
-              imageId: build.imageId,
-              tag: `docker-workflow-python:latest`,
-            },
-            toolContext
-          );
-
-          if (tagResult.ok) {
-            break;
+        const tagResult = await retryOperation(
+          () =>
+            tagImageTool.handler(
+              { imageId: build.imageId, tag: `docker-workflow-python:latest` },
+              toolContext
+            ),
+          {
+            operationName: 'Tag image',
+            logContext: { imageId: build.imageId, tag: 'docker-workflow-python:latest' },
           }
-
-          if (attempt < maxRetries - 1) {
-            console.log(`Tag attempt ${attempt + 1} failed, retrying...`);
-            await new Promise((resolve) => setTimeout(resolve, 100 * Math.pow(2, attempt)));
-          }
-        }
+        );
 
         if (!tagResult.ok) {
           console.log('Tagging failed:', tagResult.error);
@@ -374,27 +384,17 @@ CMD ["python", "app.py"]`
         expect(scanResult.ok !== undefined).toBe(true);
 
         // Tag with retry for potential race condition
-        let tagResult;
-        const maxRetries = 3;
-
-        for (let attempt = 0; attempt < maxRetries; attempt++) {
-          tagResult = await tagImageTool.handler(
-            {
-              imageId: build.imageId,
-              tag: `partial-workflow-test:latest`,
-            },
-            toolContext
-          );
-
-          if (tagResult.ok) {
-            break;
+        const tagResult = await retryOperation(
+          () =>
+            tagImageTool.handler(
+              { imageId: build.imageId, tag: `partial-workflow-test:latest` },
+              toolContext
+            ),
+          {
+            operationName: 'Tag image',
+            logContext: { imageId: build.imageId, tag: 'partial-workflow-test:latest' },
           }
-
-          if (attempt < maxRetries - 1) {
-            console.log(`Tag attempt ${attempt + 1} failed, retrying...`);
-            await new Promise((resolve) => setTimeout(resolve, 100 * Math.pow(2, attempt)));
-          }
-        }
+        );
 
         if (!tagResult.ok) {
           console.log('Tagging failed:', tagResult.error);
