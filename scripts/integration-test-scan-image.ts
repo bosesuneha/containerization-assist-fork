@@ -26,7 +26,7 @@
  *
  * Usage:
  *   npm run build
- *   npm exec -- tsx scripts/integration-test-scan-image.ts
+ *   tsx scripts/integration-test-scan-image.ts
  */
 
 import { createToolContext } from '../dist/src/mcp/context.js';
