@@ -26,7 +26,7 @@
  *
  * Usage:
  *   npm run build
- *   tsx scripts/integration-test-scan-image.ts
+ *   npm exec -- tsx scripts/integration-test-scan-image.ts
  */
 
 import { createToolContext } from '../dist/src/mcp/context.js';
@@ -226,12 +226,16 @@ function pullImage(remoteImage: string, localTag: string, maxRetries = 3): boole
         combinedError.includes('500') || combinedError.includes('Internal Server Error');
 
       if (attempt < maxRetries && isRetryable) {
-        console.log(`   ⚠️  Attempt ${attempt}/${maxRetries} failed (transient error), retrying...`);
+        console.log(
+          `   ⚠️  Attempt ${attempt}/${maxRetries} failed (transient error), retrying...`,
+        );
         // Exponential backoff: 2s, 4s, 8s
         const backoffMs = Math.pow(2, attempt) * 1000;
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, backoffMs);
       } else {
-        console.log(`   ❌ Failed to pull ${remoteImage}${attempt > 1 ? ` after ${attempt} attempts` : ''}`);
+        console.log(
+          `   ❌ Failed to pull ${remoteImage}${attempt > 1 ? ` after ${attempt} attempts` : ''}`,
+        );
         if (error instanceof Error) {
           console.log(`      Error: ${error.message}`);
         }
