@@ -171,4 +171,48 @@ describe('Scanner Factory', () => {
       expect(scanner2).toBeDefined();
     });
   });
+
+  describe('Docker Host Parameter', () => {
+    it('should accept dockerHost parameter for OSV scanner', () => {
+      const scanner = createSecurityScanner(logger, 'osv', 'unix:///custom/docker.sock');
+      expect(scanner).toBeDefined();
+      expect(scanner.scanImage).toBeDefined();
+    });
+
+    it('should accept dockerHost parameter for Trivy scanner', () => {
+      const scanner = createSecurityScanner(logger, 'trivy', 'tcp://192.168.1.10:2375');
+      expect(scanner).toBeDefined();
+      expect(scanner.scanImage).toBeDefined();
+    });
+
+    it('should accept dockerHost parameter for Snyk scanner', () => {
+      const scanner = createSecurityScanner(logger, 'snyk', 'unix:///var/run/docker.sock');
+      expect(scanner).toBeDefined();
+      expect(scanner.scanImage).toBeDefined();
+    });
+
+    it('should accept dockerHost parameter for Grype scanner', () => {
+      const scanner = createSecurityScanner(logger, 'grype', 'tcp://remote:2376');
+      expect(scanner).toBeDefined();
+      expect(scanner.scanImage).toBeDefined();
+    });
+
+    it('should work without dockerHost parameter (backward compatibility)', () => {
+      const scanner = createSecurityScanner(logger, 'osv');
+      expect(scanner).toBeDefined();
+      expect(scanner.scanImage).toBeDefined();
+    });
+
+    it('should work with undefined dockerHost', () => {
+      const scanner = createSecurityScanner(logger, 'osv', undefined);
+      expect(scanner).toBeDefined();
+      expect(scanner.scanImage).toBeDefined();
+    });
+
+    it('should ignore dockerHost for stub scanner', () => {
+      const scanner = createSecurityScanner(logger, 'stub', 'unix:///some/sock');
+      expect(scanner).toBeDefined();
+      expect(scanner.scanImage).toBeDefined();
+    });
+  });
 });

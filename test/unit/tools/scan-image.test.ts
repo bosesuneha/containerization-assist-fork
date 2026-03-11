@@ -55,6 +55,15 @@ jest.mock('../../../src/infra/security/scanner', () => ({
   createSecurityScanner: jest.fn(() => mockSecurityScanner),
 }));
 
+// Mock Docker context resolution
+const mockListDockerContexts = jest.fn() as any;
+const mockResolveDockerContext = jest.fn() as any;
+
+jest.mock('../../../src/infra/docker/context', () => ({
+  listDockerContexts: (...args: unknown[]) => mockListDockerContexts(...args),
+  resolveDockerContext: (...args: unknown[]) => mockResolveDockerContext(...args),
+}));
+
 jest.mock('../../../src/lib/logger', () => ({
   createTimer: jest.fn(() => mockTimer),
   createLogger: jest.fn(() => createMockLogger()),
@@ -653,6 +662,293 @@ describe('scanImage - Success and Error Scenarios', () => {
         expect(result.error).toContain('Out of memory');
         expect(result.guidance).toBeDefined();
       }
+    });
+  });
+
+  describe('Docker Context Support', () => {
+    describe('Specific Context Scanning', () => {
+      it('should resolve context and scan with dockerHost', async () => {
+        mockResolveDockerContext.mockResolvedValue(
+          createSuccessResult('unix:///Users/user/.colima/default/docker.sock'),
+        );
+
+        const contextConfig: ScanImageParams = {
+          ...config,
+          context: 'colima',
+        };
+
+        const result = await scanImage(contextConfig, createMockToolContext());
+
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          expect(result.value.success).toBe(true);
+          expect(result.value.context).toBe('colima');
+        }
+        expect(mockResolveDockerContext).toHaveBeenCalledWith('colima', expect.anything());
+      });
+
+      it('should fail when context resolution fails', async () => {
+        mockResolveDockerContext.mockResolvedValue(
+          createFailureResult("Failed to resolve Docker context 'nonexistent'", {
+            hint: 'The context name may be incorrect',
+            resolution: 'Run "docker context ls" to see available contexts.',
+          }),
+        );
+
+        const contextConfig: ScanImageParams = {
+          ...config,
+          context: 'nonexistent',
+        };
+
+        const result = await scanImage(contextConfig, createMockToolContext());
+
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(result.error).toContain('nonexistent');
+        }
+      });
+
+      it('should not resolve context when none specified', async () => {
+        const result = await scanImage(config, createMockToolContext());
+
+        expect(result.ok).toBe(true);
+        expect(mockResolveDockerContext).not.toHaveBeenCalled();
+        if (result.ok) {
+          expect(result.value.context).toBeUndefined();
+        }
+      });
+    });
+
+    describe('Multi-Context Scanning (context="all")', () => {
+      it('should scan across all contexts and aggregate results', async () => {
+        mockListDockerContexts.mockResolvedValue(
+          createSuccessResult([
+            {
+              name: 'default',
+              description: 'Default',
+              dockerEndpoint: 'unix:///var/run/docker.sock',
+              current: true,
+            },
+            {
+              name: 'colima',
+              description: 'colima',
+              dockerEndpoint: 'unix:///Users/user/.colima/default/docker.sock',
+              current: false,
+            },
+          ]),
+        );
+
+        mockResolveDockerContext.mockResolvedValue(
+          createSuccessResult('unix:///var/run/docker.sock'),
+        );
+
+        mockSecurityScanner.scanImage.mockResolvedValue(
+          createSuccessResult({
+            vulnerabilities: [
+              {
+                id: 'CVE-2023-1',
+                severity: 'HIGH' as const,
+                package: 'openssl',
+                version: '1.1.1',
+                description: 'Vuln',
+              },
+            ],
+            criticalCount: 0,
+            highCount: 1,
+            mediumCount: 0,
+            lowCount: 0,
+            negligibleCount: 0,
+            unknownCount: 0,
+            totalVulnerabilities: 1,
+            scanDate: new Date(),
+          }),
+        );
+
+        const allConfig: ScanImageParams = {
+          ...config,
+          context: 'all',
+        };
+
+        const result = await scanImage(allConfig, createMockToolContext());
+
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          expect(result.value.context).toBe('all');
+          expect(result.value.contextResults).toBeDefined();
+          expect(result.value.contextResults).toHaveLength(2);
+          // Aggregated: 1 high from each context = 2 total
+          expect(result.value.vulnerabilities.high).toBe(2);
+          expect(result.value.vulnerabilities.total).toBe(2);
+        }
+      });
+
+      it('should fail when listing contexts fails', async () => {
+        mockListDockerContexts.mockResolvedValue(
+          createFailureResult('Failed to list Docker contexts: ENOENT', {
+            hint: 'Docker CLI may not be installed',
+            resolution: 'Ensure Docker CLI is installed and in PATH.',
+          }),
+        );
+
+        const allConfig: ScanImageParams = {
+          ...config,
+          context: 'all',
+        };
+
+        const result = await scanImage(allConfig, createMockToolContext());
+
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(result.error).toContain('Failed to list Docker contexts');
+        }
+      });
+
+      it('should handle partial context failures gracefully', async () => {
+        mockListDockerContexts.mockResolvedValue(
+          createSuccessResult([
+            {
+              name: 'default',
+              description: 'Default',
+              dockerEndpoint: 'unix:///var/run/docker.sock',
+              current: true,
+            },
+            {
+              name: 'broken',
+              description: 'Broken context',
+              dockerEndpoint: 'tcp://unreachable:2375',
+              current: false,
+            },
+          ]),
+        );
+
+        // First context resolves, second fails
+        mockResolveDockerContext
+          .mockResolvedValueOnce(createSuccessResult('unix:///var/run/docker.sock'))
+          .mockResolvedValueOnce(
+            createFailureResult('Failed to resolve Docker context', {
+              hint: 'Connection refused',
+              resolution: 'Check Docker daemon status',
+            }),
+          );
+
+        mockSecurityScanner.scanImage.mockResolvedValue(
+          createSuccessResult({
+            vulnerabilities: [],
+            criticalCount: 0,
+            highCount: 0,
+            mediumCount: 0,
+            lowCount: 0,
+            negligibleCount: 0,
+            unknownCount: 0,
+            totalVulnerabilities: 0,
+            scanDate: new Date(),
+          }),
+        );
+
+        const allConfig: ScanImageParams = {
+          ...config,
+          context: 'all',
+        };
+
+        const result = await scanImage(allConfig, createMockToolContext());
+
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          expect(result.value.contextResults).toBeDefined();
+          const successContexts = result.value.contextResults!.filter((r) => r.success);
+          const failedContexts = result.value.contextResults!.filter((r) => !r.success);
+          expect(successContexts).toHaveLength(1);
+          expect(failedContexts).toHaveLength(1);
+        }
+      });
+
+      it('should fail when all contexts fail', async () => {
+        mockListDockerContexts.mockResolvedValue(
+          createSuccessResult([
+            {
+              name: 'broken1',
+              description: 'Broken 1',
+              dockerEndpoint: 'tcp://host1:2375',
+              current: false,
+            },
+            {
+              name: 'broken2',
+              description: 'Broken 2',
+              dockerEndpoint: 'tcp://host2:2375',
+              current: false,
+            },
+          ]),
+        );
+
+        mockResolveDockerContext.mockResolvedValue(createFailureResult('Connection refused'));
+
+        const allConfig: ScanImageParams = {
+          ...config,
+          context: 'all',
+        };
+
+        const result = await scanImage(allConfig, createMockToolContext());
+
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(result.error).toContain('Failed to scan image in any Docker context');
+        }
+      });
+
+      it('should skip contexts that have errors pre-listed', async () => {
+        mockListDockerContexts.mockResolvedValue(
+          createSuccessResult([
+            {
+              name: 'default',
+              description: 'Default',
+              dockerEndpoint: 'unix:///var/run/docker.sock',
+              current: true,
+            },
+            {
+              name: 'errored',
+              description: 'Has error',
+              dockerEndpoint: 'tcp://bad:2375',
+              current: false,
+              error: 'context endpoint unreachable',
+            },
+          ]),
+        );
+
+        mockResolveDockerContext.mockResolvedValue(
+          createSuccessResult('unix:///var/run/docker.sock'),
+        );
+
+        mockSecurityScanner.scanImage.mockResolvedValue(
+          createSuccessResult({
+            vulnerabilities: [],
+            criticalCount: 0,
+            highCount: 0,
+            mediumCount: 0,
+            lowCount: 0,
+            negligibleCount: 0,
+            unknownCount: 0,
+            totalVulnerabilities: 0,
+            scanDate: new Date(),
+          }),
+        );
+
+        const allConfig: ScanImageParams = {
+          ...config,
+          context: 'all',
+        };
+
+        const result = await scanImage(allConfig, createMockToolContext());
+
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          expect(result.value.contextResults).toBeDefined();
+          // Only 1 resolveDockerContext call (the errored one is skipped)
+          expect(mockResolveDockerContext).toHaveBeenCalledTimes(1);
+          const erroredResult = result.value.contextResults!.find((r) => r.context === 'errored');
+          expect(erroredResult?.success).toBe(false);
+          expect(erroredResult?.error).toBe('context endpoint unreachable');
+        }
+      });
     });
   });
 });

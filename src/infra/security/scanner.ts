@@ -6,9 +6,9 @@ import { scanImageWithTrivy, checkTrivyAvailability } from './trivy-scanner';
 import { scanImageWithSnyk, checkSnykAvailability } from './snyk-scanner';
 import { scanImageWithGrype, checkGrypeAvailability } from './grype-scanner';
 import { scanImageWithOSV, checkOSVAvailability } from './osv-scanner/index';
-import { autoDetectDockerSocket } from '@/infra/docker/socket-validation';
+import { autoDetectDockerSocket, parseDockerHost } from '@/infra/docker/socket-validation';
 
-interface SecurityScanner {
+export interface SecurityScanner {
   scanImage: (imageId: string) => Promise<Result<BasicScanResult>>;
   ping: () => Promise<Result<boolean>>;
 }
@@ -34,12 +34,48 @@ export interface BasicScanResult {
 }
 
 /**
- * Create a Trivy-based security scanner
+ * Build Docker options from a dockerHost endpoint string.
+ * Handles unix sockets, TCP URLs, and raw socket paths.
  */
-function createTrivyScanner(logger: Logger): SecurityScanner {
+function buildDockerOptions(dockerHost: string): Docker.DockerOptions {
+  if (
+    dockerHost.startsWith('tcp://') ||
+    dockerHost.startsWith('http://') ||
+    dockerHost.startsWith('https://')
+  ) {
+    try {
+      const parsed = parseDockerHost(dockerHost);
+      if (parsed.type === 'tcp') {
+        const opts: Docker.DockerOptions = { host: parsed.host, port: parsed.port };
+        if (parsed.value.startsWith('https://')) {
+          opts.protocol = 'https';
+        }
+        return opts;
+      }
+    } catch {
+      // fallback
+    }
+    return { host: 'localhost', port: 2375 };
+  }
+
+  // unix:// scheme
+  if (dockerHost.startsWith('unix://')) {
+    return { socketPath: dockerHost.slice('unix://'.length) };
+  }
+
+  // Raw path (e.g., /var/run/docker.sock)
+  return { socketPath: dockerHost };
+}
+
+/**
+ * Create a Trivy-based security scanner
+ * @param logger - Logger instance
+ * @param dockerHost - Optional Docker daemon endpoint to target a specific context
+ */
+function createTrivyScanner(logger: Logger, dockerHost?: string): SecurityScanner {
   return {
     async scanImage(imageId: string): Promise<Result<BasicScanResult>> {
-      return scanImageWithTrivy(imageId, logger);
+      return scanImageWithTrivy(imageId, logger, dockerHost);
     },
 
     async ping(): Promise<Result<boolean>> {
@@ -55,11 +91,13 @@ function createTrivyScanner(logger: Logger): SecurityScanner {
 
 /**
  * Create a Snyk-based security scanner
+ * @param logger - Logger instance
+ * @param dockerHost - Optional Docker daemon endpoint to target a specific context
  */
-function createSnykScanner(logger: Logger): SecurityScanner {
+function createSnykScanner(logger: Logger, dockerHost?: string): SecurityScanner {
   return {
     async scanImage(imageId: string): Promise<Result<BasicScanResult>> {
-      return scanImageWithSnyk(imageId, logger);
+      return scanImageWithSnyk(imageId, logger, dockerHost);
     },
 
     async ping(): Promise<Result<boolean>> {
@@ -75,11 +113,13 @@ function createSnykScanner(logger: Logger): SecurityScanner {
 
 /**
  * Create a Grype-based security scanner
+ * @param logger - Logger instance
+ * @param dockerHost - Optional Docker daemon endpoint to target a specific context
  */
-function createGrypeScanner(logger: Logger): SecurityScanner {
+function createGrypeScanner(logger: Logger, dockerHost?: string): SecurityScanner {
   return {
     async scanImage(imageId: string): Promise<Result<BasicScanResult>> {
-      return scanImageWithGrype(imageId, logger);
+      return scanImageWithGrype(imageId, logger, dockerHost);
     },
 
     async ping(): Promise<Result<boolean>> {
@@ -96,11 +136,20 @@ function createGrypeScanner(logger: Logger): SecurityScanner {
 /**
  * Create an OSV-based security scanner
  * Uses OSV API (no external CLI required)
+ * @param logger - Logger instance
+ * @param dockerHost - Optional Docker daemon endpoint to target a specific context
  */
-function createOSVScanner(logger: Logger): SecurityScanner {
-  // Create Docker client for image inspection
-  const socketPath = autoDetectDockerSocket();
-  const docker = new Docker({ socketPath });
+function createOSVScanner(logger: Logger, dockerHost?: string): SecurityScanner {
+  // Create Docker client for image inspection, targeting specific daemon if provided
+  let docker: Docker;
+  if (dockerHost) {
+    const opts = buildDockerOptions(dockerHost);
+    docker = new Docker(opts);
+    logger.debug({ dockerHost, opts }, 'Created Docker client for specific context');
+  } else {
+    const socketPath = autoDetectDockerSocket();
+    docker = new Docker({ socketPath });
+  }
 
   return {
     async scanImage(imageId: string): Promise<Result<BasicScanResult>> {
@@ -167,24 +216,29 @@ function createStubScanner(logger: Logger): SecurityScanner {
  *
  * @param logger - Logger instance
  * @param scannerType - Type of scanner to create ('osv', 'trivy', 'snyk', 'grype', 'stub', or undefined for 'osv')
+ * @param dockerHost - Optional Docker daemon endpoint to target a specific Docker context
  * @returns SecurityScanner instance
  */
-export const createSecurityScanner = (logger: Logger, scannerType?: string): SecurityScanner => {
+export const createSecurityScanner = (
+  logger: Logger,
+  scannerType?: string,
+  dockerHost?: string,
+): SecurityScanner => {
   const type = (scannerType || 'osv').toLowerCase();
 
   switch (type) {
     case 'osv':
-      return createOSVScanner(logger);
+      return createOSVScanner(logger, dockerHost);
     case 'trivy':
-      return createTrivyScanner(logger);
+      return createTrivyScanner(logger, dockerHost);
     case 'snyk':
-      return createSnykScanner(logger);
+      return createSnykScanner(logger, dockerHost);
     case 'grype':
-      return createGrypeScanner(logger);
+      return createGrypeScanner(logger, dockerHost);
     case 'stub':
       return createStubScanner(logger);
     default:
       logger.warn({ scannerType: type }, 'Unknown scanner type, falling back to OSV');
-      return createOSVScanner(logger);
+      return createOSVScanner(logger, dockerHost);
   }
 };

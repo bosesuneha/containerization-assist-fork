@@ -105,7 +105,9 @@ function parseTrivyOutput(trivyOutput: TrivyOutput, imageId: string): BasicScanR
  */
 async function getTrivyVersion(logger: Logger): Promise<Result<string>> {
   try {
-    const { stdout } = await execAsync('trivy --version', { timeout: DEFAULT_TIMEOUTS.trivyVersionCheck });
+    const { stdout } = await execAsync('trivy --version', {
+      timeout: DEFAULT_TIMEOUTS.trivyVersionCheck,
+    });
     // Trivy version output format: "Version: X.Y.Z"
     const version = parseVersion(stdout, /Version:\s*([^\s\n]+)/);
     if (!version) {
@@ -143,10 +145,14 @@ export async function checkTrivyAvailability(logger: Logger): Promise<Result<str
 
 /**
  * Scan a Docker image using Trivy
+ * @param imageId - Docker image ID or name to scan
+ * @param logger - Logger instance
+ * @param dockerHost - Optional Docker daemon endpoint to target a specific context
  */
 export async function scanImageWithTrivy(
   imageId: string,
   logger: Logger,
+  dockerHost?: string,
 ): Promise<Result<BasicScanResult>> {
   // Validate imageId to prevent command injection
   if (!validateImageId(imageId)) {
@@ -168,10 +174,13 @@ export async function scanImageWithTrivy(
     // --quiet: suppress progress output
     // --timeout 5m: set timeout to 5 minutes
     const args = ['image', '--format', 'json', '--quiet', '--timeout', '5m', imageId];
-    logger.debug({ args }, 'Executing Trivy command');
+    logger.debug({ args, dockerHost }, 'Executing Trivy command');
+
+    const execEnv = dockerHost ? { ...process.env, DOCKER_HOST: dockerHost } : process.env;
 
     const { stdout, stderr } = await execFileAsync('trivy', args, {
       maxBuffer: LIMITS.MAX_SCAN_BUFFER, // 10MB buffer for large scan results
+      env: execEnv,
     });
 
     // Log any warnings from stderr
